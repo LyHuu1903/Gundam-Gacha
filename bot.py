@@ -1,10 +1,16 @@
+import os
 import discord
 from discord.ext import commands
 import random
 
 # =================== CẤU HÌNH BOT ===================
 
-TOKEN = "MTQ0MzI3MTM3MjcyODk2MzIwMw.GLGK9v.fIbqVTOWeAY7I1Q8IxsNezrB4xHHIYzfMtsLZI"
+# Lấy token từ biến môi trường DISCORD_TOKEN (set trên Railway)
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+if not TOKEN:
+    # In ra cảnh báo khi chạy local mà quên set env
+    print("⚠️  Không tìm thấy DISCORD_TOKEN trong biến môi trường!")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -65,7 +71,7 @@ CARD_POOL = [
     {"id": "GM_COLD",       "name": "RGM-79D GM Cold Districts",       "rarity": "R"},
     {"id": "ZAKU_SNIPER",   "name": "MS-05L Zaku I Sniper",            "rarity": "R"},
     {"id": "LEO",           "name": "OZ-06MS Leo (Custom Colors)",     "rarity": "R"},
-    {"id": "GINN_H",        "name": "ZGMF-1017 GINN High-Maneuver",   "rarity": "R"},
+    {"id": "GINN_H",        "name": "ZGMF-1017 GINN High-Maneuver",    "rarity": "R"},
     {"id": "AHEAD",         "name": "GNX-704T Ahead",                  "rarity": "R"},
 
     # ====== COMMON (C) – LÍNH, MASS PRODUCED ======
@@ -166,9 +172,13 @@ async def on_ready():
 
 @bot.command()
 async def start(ctx):
+    """Tạo tài khoản & nhận 100 Gem lần đầu."""
     player = get_player(ctx.author)
-
-    if player["gems"] == 0 and not player["inventory"] and player["stats"]["rolls"] == 0:
+    if (
+        player["gems"] == 0
+        and not player["inventory"]
+        and player["stats"]["rolls"] == 0
+    ):
         player["gems"] = 100
         await ctx.send(
             f"🎉 {ctx.author.mention} đã tham gia **Gundam Gacha**!\n"
@@ -176,7 +186,8 @@ async def start(ctx):
         )
     else:
         await ctx.send(
-            f"✅ {ctx.author.mention} bạn đã có tài khoản rồi. Dùng `!balance` để xem Gem."
+            f"✅ {ctx.author.mention} bạn đã có tài khoản rồi. "
+            f"Dùng `!balance` để xem Gem."
         )
 
 
@@ -303,8 +314,13 @@ async def collection(ctx):
 
 @bot.command()
 async def cards(ctx):
+    """Xem danh sách card có thể quay (tự chia nhỏ tránh > 2000 ký tự)."""
     lines = [format_card(c) for c in CARD_POOL]
-    await ctx.send("🎴 **Các card có thể quay:**\n" + "\n".join(lines))
+    text = "🎴 **Các card có thể quay:**\n" + "\n".join(lines)
+
+    chunk_size = 1900
+    for i in range(0, len(text), chunk_size):
+        await ctx.send(text[i:i + chunk_size])
 
 # =================== PROFILE / SELL / TOP ===================
 
