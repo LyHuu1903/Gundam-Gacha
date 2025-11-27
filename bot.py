@@ -2,6 +2,7 @@ import os
 import discord
 from discord.ext import commands
 import random
+from datetime import date  # dùng cho hệ thống quest
 
 # =================== CẤU HÌNH BOT ===================
 
@@ -121,20 +122,50 @@ SELL_VALUES = {
 # players[user_id] = {
 #   "gems": int,
 #   "inventory": {card_id: count},
-#   "stats": {"rolls": int, "UR": int, "SR": int, "R": int, "C": int}
+#   "stats": {"rolls": int, "UR": int, "SR": int, "R": int, "C": int},
+#   "quests": {"date": "YYYY-MM-DD", "gacha_rolls": int, "claimed": bool}
 # }
 players = {}
 
 
 def get_player(user):
+    """Lấy / tạo player, đảm bảo luôn có trường quests."""
     uid = user.id
+    today = date.today().isoformat()
+
     if uid not in players:
         players[uid] = {
             "gems": 0,
             "inventory": {},
             "stats": {"rolls": 0, "UR": 0, "SR": 0, "R": 0, "C": 0},
+            "quests": {
+                "date": today,
+                "gacha_rolls": 0,
+                "claimed": False,
+            },
         }
-    return players[uid]
+
+    player = players[uid]
+
+    # Player cũ chưa có field quests thì bổ sung
+    if "quests" not in player:
+        player["quests"] = {
+            "date": today,
+            "gacha_rolls": 0,
+            "claimed": False,
+        }
+
+    return player
+
+
+def reset_quests_if_new_day(player):
+    """Nếu qua ngày mới thì reset nhiệm vụ ngày."""
+    today = date.today().isoformat()
+    q = player["quests"]
+    if q["date"] != today:
+        q["date"] = today
+        q["gacha_rolls"] = 0
+        q["claimed"] = False
 
 
 def get_cards_by_rarity(rarity: str):
@@ -240,9 +271,14 @@ async def gacha(ctx, times: int = 1):
         )
         return
 
+    # Trừ gem + cập nhật stats
     player["gems"] -= total_cost
     stats = player["stats"]
     stats["rolls"] += times
+
+    # Cập nhật tiến độ quest ngày
+    reset_quests_if_new_day(player)
+    player["quests"]["gacha_rolls"] += times
 
     results = []
     for _ in range(times):
@@ -419,6 +455,75 @@ async def top(ctx):
     )
     await ctx.send(embed=embed)
 
+# =================== QUEST NGÀY ===================
+
+@bot.command(name="quests")
+async def quests_cmd(ctx):
+    """Xem nhiệm vụ ngày để kiếm Gem."""
+    player = get_player(ctx.author)
+    reset_quests_if_new_day(player)
+    q = player["quests"]
+
+    target = 10     # cần quay 10 lần
+    reward = 50     # thưởng 50 Gem
+    progress = q["gacha_rolls"]
+    done = progress >= target
+    claimed = q["claimed"]
+
+    status = "✅ ĐÃ HOÀN THÀNH" if done else "⏳ Đang làm"
+    if done and claimed:
+        status += " – 🎁 ĐÃ NHẬN THƯỞNG"
+
+    embed = discord.Embed(
+        title="📜 Nhiệm vụ ngày – Gundam Gacha",
+        color=discord.Color.green()
+    )
+    embed.add_field(
+        name="Nhiệm vụ 1: Quay gacha",
+        value=(
+            f"Quay **{target} lần gacha** trong hôm nay.\n"
+            f"Tiến độ: **{progress}/{target}**\n"
+            f"Trạng thái: {status}\n"
+            f"Phần thưởng: **+{reward} Gem** (dùng `!questclaim` để nhận)"
+        ),
+        inline=False
+    )
+
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def questclaim(ctx):
+    """Nhận thưởng nhiệm vụ ngày (nếu đủ điều kiện)."""
+    player = get_player(ctx.author)
+    reset_quests_if_new_day(player)
+    q = player["quests"]
+
+    target = 10
+    reward = 50
+
+    if q["claimed"]:
+        await ctx.send(
+            f"✅ {ctx.author.mention} hôm nay bạn đã nhận thưởng nhiệm vụ rồi, "
+            "hãy quay lại vào ngày mai nhé!"
+        )
+        return
+
+    if q["gacha_rolls"] < target:
+        await ctx.send(
+            f"⏳ {ctx.author.mention} bạn chưa hoàn thành nhiệm vụ.\n"
+            f"Hãy quay thêm gacha (hiện tại **{q['gacha_rolls']}/{target}**)."
+        )
+        return
+
+    q["claimed"] = True
+    player["gems"] += reward
+
+    await ctx.send(
+        f"🎁 {ctx.author.mention} nhận **{reward} Gem** từ nhiệm vụ ngày!\n"
+        f"Gem hiện tại: **{player['gems']}**"
+    )
+
 # =================== LỆNH LIỆT KÊ COMMAND ===================
 
 @bot.command(name="commands")
@@ -434,7 +539,9 @@ async def commands_list(ctx):
             "`!start` – tạo tài khoản\n"
             "`!daily` – nhận Gem mỗi ngày\n"
             "`!balance` – xem số Gem hiện tại\n"
-            "`!profile` – xem hồ sơ gacha của bạn"
+            "`!profile` – xem hồ sơ gacha của bạn\n"
+            "`!quests` – xem nhiệm vụ ngày\n"
+            "`!questclaim` – nhận thưởng nhiệm vụ ngày"
         ),
         inline=False
     )
