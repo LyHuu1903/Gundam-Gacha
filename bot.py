@@ -119,6 +119,14 @@ SELL_VALUES = {
     "C": 3,
 }
 
+# Sức mạnh base theo độ hiếm (dùng cho duel)
+RARITY_POWER = {
+    "UR": 4,
+    "SR": 3,
+    "R": 2,
+    "C": 1,
+}
+
 # players[user_id] = {
 #   "gems": int,
 #   "inventory": {card_id: count},
@@ -126,6 +134,15 @@ SELL_VALUES = {
 #   "quests": {"date": "YYYY-MM-DD", "gacha_rolls": int, "claimed": bool}
 # }
 players = {}
+
+# Thống kê toàn server
+GLOBAL_STATS = {
+    "rolls": 0,
+    "UR": 0,
+    "SR": 0,
+    "R": 0,
+    "C": 0,
+}
 
 
 def get_player(user):
@@ -188,6 +205,21 @@ def add_card_to_inventory(player, card_id: str, amount: int = 1):
 
 def format_card(card):
     return f"{RARITY_EMOJI[card['rarity']]} **{card['name']}** (`{card['id']}`)"
+
+
+def get_random_card_from_inventory(player):
+    """Chọn ngẫu nhiên 1 card từ inventory của player."""
+    inv = player["inventory"]
+    pool = []
+    for card_id, count in inv.items():
+        pool.extend([card_id] * count)
+
+    if not pool:
+        return None
+
+    chosen_id = random.choice(pool)
+    card = next((c for c in CARD_POOL if c["id"] == chosen_id), None)
+    return card
 
 
 # =================== EVENT ===================
@@ -280,12 +312,16 @@ async def gacha(ctx, times: int = 1):
     reset_quests_if_new_day(player)
     player["quests"]["gacha_rolls"] += times
 
+    # Cập nhật global stats
+    GLOBAL_STATS["rolls"] += times
+
     results = []
     for _ in range(times):
         card = roll_one_card()
         results.append(card)
         add_card_to_inventory(player, card["id"], 1)
         stats[card["rarity"]] += 1
+        GLOBAL_STATS[card["rarity"]] += 1
 
     lines = [format_card(c) for c in results]
 
@@ -524,6 +560,282 @@ async def questclaim(ctx):
         f"Gem hiện tại: **{player['gems']}**"
     )
 
+# =================== TÍNH NĂNG MỚI: GIFT / REROLL / CARDINFO / GLOBAL STATS ===================
+
+@bot.command()
+async def gift(ctx, member: discord.Member, amount: int):
+    """
+    Chuyển Gem cho người khác.
+    Ví dụ: !gift @TênNgườiNhận 50
+    """
+    if amount <= 0:
+        await ctx.send("❌ Số Gem chuyển phải > 0.")
+        return
+
+    if member.id == ctx.author.id:
+        await ctx.send("❌ Bạn không thể tự chuyển Gem cho chính mình.")
+        return
+
+    sender = get_player(ctx.author)
+    receiver = get_player(member)
+
+    if sender["gems"] < amount:
+        await ctx.send(
+            f"❌ {ctx.author.mention} không đủ Gem để chuyển.\n"
+            f"Gem hiện tại: **{sender['gems']}**"
+        )
+        return
+
+    sender["gems"] -= amount
+    receiver["gems"] += amount
+
+    await ctx.send(
+        f"💳 {ctx.author.mention} đã chuyển **{amount} Gem** cho {member.mention}.\n"
+        f"Gem của bạn còn: **{sender['gems']}**"
+    )
+
+
+@bot.command()
+async def reroll(ctx, card_id: str):
+    """
+    Đổi 1 card sang 1 card random cùng độ hiếm (tốn Gem).
+    Ví dụ: !reroll ZAKU2
+    """
+    card_id = card_id.upper()
+    cost = 30  # giá reroll
+
+    player = get_player(ctx.author)
+    inv = player["inventory"]
+
+    if card_id not in inv or inv[card_id] < 1:
+        await ctx.send(
+            f"❌ {ctx.author.mention} không có card `{card_id}` để reroll."
+        )
+        return
+
+    if player["gems"] < cost:
+        await ctx.send(
+            f"❌ {ctx.author.mention} không đủ Gem để reroll (cần **{cost} Gem**).\n"
+            f"Gem hiện tại: **{player['gems']}**"
+        )
+        return
+
+    old_card = next((c for c in CARD_POOL if c["id"] == card_id), None)
+    if not old_card:
+        await ctx.send("❌ Card ID không hợp lệ.")
+        return
+
+    rarity = old_card["rarity"]
+    same_rarity_cards = [c for c in CARD_POOL if c["rarity"] == rarity and c["id"] != card_id]
+
+    if not same_rarity_cards:
+        await ctx.send("⚠️ Không có card nào khác cùng độ hiếm để reroll.")
+        return
+
+    # Trừ Gem + trừ card cũ
+    player["gems"] -= cost
+    inv[card_id] -= 1
+    if inv[card_id] <= 0:
+        del inv[card_id]
+
+    # Nhận card mới cùng rarity
+    new_card = random.choice(same_rarity_cards)
+    add_card_to_inventory(player, new_card["id"], 1)
+
+    await ctx.send(
+        f"🎲 {ctx.author.mention} đã reroll **{old_card['name']}** (`{old_card['id']}`) "
+        f"thành **{new_card['name']}** (`{new_card['id']}`) – độ hiếm **{rarity}**.\n"
+        f"💰 Gem còn lại: **{player['gems']}**"
+    )
+
+
+@bot.command()
+async def cardinfo(ctx, card_id: str):
+    """
+    Xem thông tin 1 card.
+    Ví dụ: !cardinfo RX78
+    """
+    card_id = card_id.upper()
+    card = next((c for c in CARD_POOL if c["id"] == card_id), None)
+
+    if not card:
+        await ctx.send(f"❌ Không tìm thấy card với ID `{card_id}`.")
+        return
+
+    rarity = card["rarity"]
+    embed = discord.Embed(
+        title=f"📇 Thông tin card: {card['name']}",
+        color=discord.Color.from_str("#FFD700") if rarity == "UR" else (
+            discord.Color.from_str("#00FFFF") if rarity == "SR" else (
+                discord.Color.from_str("#00FF7F") if rarity == "R" else discord.Color.light_grey()
+            )
+        )
+    )
+    embed.add_field(name="ID", value=card["id"], inline=True)
+    embed.add_field(name="Độ hiếm", value=f"{RARITY_EMOJI[rarity]} `{rarity}`", inline=True)
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def globalstats(ctx):
+    """
+    Thống kê chung toàn server: tổng lượt quay, tổng UR/SR/R/C.
+    """
+    if GLOBAL_STATS["rolls"] == 0:
+        await ctx.send("⚠️ Chưa có ai quay gacha cả.")
+        return
+
+    embed = discord.Embed(
+        title="🌐 Thống kê toàn server – Gundam Gacha",
+        color=discord.Color.teal()
+    )
+    embed.add_field(name="Tổng lượt quay", value=str(GLOBAL_STATS["rolls"]), inline=False)
+    embed.add_field(
+        name="Rarity tổng",
+        value=(
+            f"🌈 UR: **{GLOBAL_STATS['UR']}**\n"
+            f"💎 SR: **{GLOBAL_STATS['SR']}**\n"
+            f"✨ R: **{GLOBAL_STATS['R']}**\n"
+            f"⭐ C: **{GLOBAL_STATS['C']}**"
+        ),
+        inline=False
+    )
+    await ctx.send(embed=embed)
+
+# =================== ĐÁNH NHAU – DUEL ===================
+
+@bot.command()
+async def duel(ctx, opponent: discord.Member, bet: int = 0):
+    """
+    Thách đấu 1vs1 dùng card trong bộ sưu tập.
+    Ví dụ:
+      !duel @TênBạn         -> không cược
+      !duel @TênBạn 50      -> mỗi người đặt 50 Gem, thắng ăn hết
+    """
+    if opponent.id == ctx.author.id:
+        await ctx.send("❌ Bạn không thể tự đấu với chính mình.")
+        return
+
+    if bet < 0:
+        await ctx.send("❌ Tiền cược không thể âm.")
+        return
+
+    p1 = get_player(ctx.author)
+    p2 = get_player(opponent)
+
+    # Check có card để đánh không
+    if not p1["inventory"]:
+        await ctx.send(f"❌ {ctx.author.mention} chưa có card nào để đấu, hãy `!gacha` trước.")
+        return
+
+    if not p2["inventory"]:
+        await ctx.send(f"❌ {opponent.mention} chưa có card nào để đấu, họ cần `!gacha` trước.")
+        return
+
+    # Check Gem đủ cược nếu có bet
+    if bet > 0:
+        if p1["gems"] < bet:
+            await ctx.send(
+                f"❌ {ctx.author.mention} không đủ Gem để cược (**{bet} Gem**).\n"
+                f"Gem của bạn: **{p1['gems']}**"
+            )
+            return
+        if p2["gems"] < bet:
+            await ctx.send(
+                f"❌ {opponent.mention} không đủ Gem để cược (**{bet} Gem**).\n"
+                f"Gem của họ: **{p2['gems']}**"
+            )
+            return
+
+        # Trừ cược tạm thời
+        p1["gems"] -= bet
+        p2["gems"] -= bet
+
+    # Chọn card random cho mỗi người
+    c1 = get_random_card_from_inventory(p1)
+    c2 = get_random_card_from_inventory(p2)
+
+    if c1 is None or c2 is None:
+        await ctx.send("⚠️ Lỗi chọn card, thử lại sau.")
+        # Hoàn lại cược nếu có
+        if bet > 0:
+            p1["gems"] += bet
+            p2["gems"] += bet
+        return
+
+    # Tính sức mạnh: base theo rarity + random thêm
+    base1 = RARITY_POWER.get(c1["rarity"], 1)
+    base2 = RARITY_POWER.get(c2["rarity"], 1)
+    roll1 = random.randint(0, 3)
+    roll2 = random.randint(0, 3)
+    power1 = base1 + roll1
+    power2 = base2 + roll2
+
+    # Xử lý kết quả
+    result_text = ""
+    if power1 > power2:
+        # ctx.author thắng
+        if bet > 0:
+            reward = bet * 2
+            p1["gems"] += reward
+            result_text = (
+                f"🏆 {ctx.author.mention} **CHIẾN THẮNG** và nhận **{reward} Gem** "
+                f"từ tiền cược!"
+            )
+        else:
+            result_text = f"🏆 {ctx.author.mention} **CHIẾN THẮNG**!"
+    elif power2 > power1:
+        # opponent thắng
+        if bet > 0:
+            reward = bet * 2
+            p2["gems"] += reward
+            result_text = (
+                f"🏆 {opponent.mention} **CHIẾN THẮNG** và nhận **{reward} Gem** "
+                f"từ tiền cược!"
+            )
+        else:
+            result_text = f"🏆 {opponent.mention} **CHIẾN THẮNG**!"
+    else:
+        # Hòa -> hoàn cược
+        if bet > 0:
+            p1["gems"] += bet
+            p2["gems"] += bet
+        result_text = "⚔️ Trận đấu **HÒA**! Cả hai đều chiến quá ác."
+
+    embed = discord.Embed(
+        title="🤺 Gundam Gacha – Trận đấu 1vs1",
+        color=discord.Color.red()
+    )
+    embed.add_field(
+        name=f"{ctx.author.display_name}",
+        value=(
+            f"Card: {format_card(c1)}\n"
+            f"Sức mạnh: **{power1}** "
+            f"(base {base1} + roll {roll1})"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name=f"{opponent.display_name}",
+        value=(
+            f"Card: {format_card(c2)}\n"
+            f"Sức mạnh: **{power2}** "
+            f"(base {base2} + roll {roll2})"
+        ),
+        inline=False
+    )
+
+    if bet > 0:
+        embed.add_field(
+            name="💰 Tiền cược",
+            value=f"Mỗi người: **{bet} Gem**",
+            inline=False
+        )
+
+    embed.add_field(name="Kết quả", value=result_text, inline=False)
+
+    await ctx.send(embed=embed)
+
 # =================== LỆNH LIỆT KÊ COMMAND ===================
 
 @bot.command(name="commands")
@@ -551,16 +863,21 @@ async def commands_list(ctx):
         value=(
             "`!gacha` hoặc `!gacha 10` – quay 1 / 10 lần\n"
             "`!collection` – xem bộ sưu tập card\n"
-            "`!cards` – xem tất cả card có thể quay"
+            "`!cards` – xem tất cả card có thể quay\n"
+            "`!cardinfo <CARD_ID>` – xem thông tin 1 card"
         ),
         inline=False
     )
 
     embed.add_field(
-        name="💸 Bán & Xếp hạng",
+        name="💸 Giao dịch, Đấu & Xếp hạng",
         value=(
             "`!sell <CARD_ID> <SỐ_LƯỢNG>` – bán card lấy Gem\n"
-            "`!top` – bảng xếp hạng người chơi"
+            "`!gift @user <SỐ_GEM>` – chuyển Gem cho người khác\n"
+            "`!reroll <CARD_ID>` – đổi 1 card sang card khác cùng độ hiếm (tốn Gem)\n"
+            "`!duel @user [CƯỢC]` – đấu 1vs1, dùng card random, có thể cược Gem\n"
+            "`!top` – bảng xếp hạng người chơi\n"
+            "`!globalstats` – thống kê toàn server"
         ),
         inline=False
     )
