@@ -1,24 +1,160 @@
 import os
-import discord
-from discord.ext import commands
+import json
 import random
-from datetime import date  # dùng cho hệ thống quest
+import asyncio
+from datetime import date, datetime, timedelta
+import discord
+from discord.ext import commands, tasks
 
-# =================== CẤU HÌNH BOT ===================
+# =====================================================
+#   GUNDAM GACHA V2 - FULL SYSTEM
+# =====================================================
 
-# Lấy token từ biến môi trường DISCORD_TOKEN (set trên Railway)
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 if not TOKEN:
-    # In ra cảnh báo khi chạy local mà quên set env
-    print("⚠️  Không tìm thấy DISCORD_TOKEN trong biến môi trường!")
+    print("⚠️ Không tìm thấy DISCORD_TOKEN trong biến môi trường!")
 
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# =================== DỮ LIỆU GAME ===================
+DATA_FILE = "gundam_data.json"
+
+players = {}
+GLOBAL_STATS = {
+    "rolls": 0,
+    "UR": 0,
+    "SR": 0,
+    "R": 0,
+    "C": 0,
+}
+
+# =====================================================
+# LOAD & SAVE
+# =====================================================
+
+def load_data():
+    global players, GLOBAL_STATS
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        new_players = {}
+        for uid_str, pdata in data.get("players", {}).items():
+            try:
+                new_players[int(uid_str)] = pdata
+            except:
+                pass
+
+        players = new_players or players
+        GLOBAL_STATS.update(data.get("global_stats", {}))
+
+        print("✅ Loaded saved data.")
+
+    except FileNotFoundError:
+        print("ℹ️ No save file found, starting fresh.")
+    except Exception as e:
+        print("⚠️ Error loading:", e)
+
+
+def save_data():
+    try:
+        data = {
+            "players": {str(uid): pdata for uid, pdata in players.items()},
+            "global_stats": GLOBAL_STATS,
+        }
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    except Exception as e:
+        print("⚠️ Error saving:", e)
+
+
+@tasks.loop(seconds=30)
+async def autosave():
+    save_data()
+    print("💾 Auto-saved data.")
+
+
+# =====================================================
+# PLAYER DATA SYSTEM
+# =====================================================
+
+def get_player(user):
+    uid = user.id
+    today = date.today().isoformat()
+
+    if uid not in players:
+        players[uid] = {
+            "gems": 0,
+            "inventory": {},
+
+            "stats": {
+                "rolls": 0,
+                "UR": 0,
+                "SR": 0,
+                "R": 0,
+                "C": 0,
+            },
+
+            "daily": {
+                "date": today,
+                "open": 0,
+                "sell": 0,
+                "sr": 0,
+                "ur": 0,
+                "duel": 0,
+                "claimed": {},
+            },
+
+            "weekly": {
+                "week_start": today,
+                "open": 0,
+                "sr": 0,
+                "ur": 0,
+                "duel": 0,
+                "claimed": {},
+            },
+
+            "achievements": {},
+        }
+
+    return players[uid]
+
+
+def reset_daily(player):
+    today = date.today().isoformat()
+    if player["daily"]["date"] != today:
+        player["daily"] = {
+            "date": today,
+            "open": 0,
+            "sell": 0,
+            "sr": 0,
+            "ur": 0,
+            "duel": 0,
+            "claimed": {},
+        }
+
+
+def reset_weekly(player):
+    today = date.today()
+    week_start = datetime.strptime(player["weekly"]["week_start"], "%Y-%m-%d").date()
+    if today - week_start >= timedelta(days=7):
+        player["weekly"] = {
+            "week_start": today.isoformat(),
+            "open": 0,
+            "sr": 0,
+            "ur": 0,
+            "duel": 0,
+            "claimed": {},
+        }
+
+# END OF PART 1
+# =====================================================
+# CARD POOL (RẤT NHIỀU CARD)
+# =====================================================
 
 CARD_POOL = [
     # ====== ULTRA RARE (UR) – HÀNG CỰC HIẾM ======
@@ -119,7 +255,6 @@ SELL_VALUES = {
     "C": 3,
 }
 
-# Sức mạnh base theo độ hiếm (dùng cho duel)
 RARITY_POWER = {
     "UR": 4,
     "SR": 3,
@@ -127,65 +262,12 @@ RARITY_POWER = {
     "C": 1,
 }
 
-# players[user_id] = {
-#   "gems": int,
-#   "inventory": {card_id: count},
-#   "stats": {"rolls": int, "UR": int, "SR": int, "R": int, "C": int},
-#   "quests": {"date": "YYYY-MM-DD", "gacha_rolls": int, "claimed": bool}
-# }
-players = {}
 
-# Thống kê toàn server
-GLOBAL_STATS = {
-    "rolls": 0,
-    "UR": 0,
-    "SR": 0,
-    "R": 0,
-    "C": 0,
-}
+# =====================================================
+# UTILS
+# =====================================================
 
-
-def get_player(user):
-    """Lấy / tạo player, đảm bảo luôn có trường quests."""
-    uid = user.id
-    today = date.today().isoformat()
-
-    if uid not in players:
-        players[uid] = {
-            "gems": 0,
-            "inventory": {},
-            "stats": {"rolls": 0, "UR": 0, "SR": 0, "R": 0, "C": 0},
-            "quests": {
-                "date": today,
-                "gacha_rolls": 0,
-                "claimed": False,
-            },
-        }
-
-    player = players[uid]
-
-    # Player cũ chưa có field quests thì bổ sung
-    if "quests" not in player:
-        player["quests"] = {
-            "date": today,
-            "gacha_rolls": 0,
-            "claimed": False,
-        }
-
-    return player
-
-
-def reset_quests_if_new_day(player):
-    """Nếu qua ngày mới thì reset nhiệm vụ ngày."""
-    today = date.today().isoformat()
-    q = player["quests"]
-    if q["date"] != today:
-        q["date"] = today
-        q["gacha_rolls"] = 0
-        q["claimed"] = False
-
-
-def get_cards_by_rarity(rarity: str):
+def get_cards_by_rarity(rarity):
     return [c for c in CARD_POOL if c["rarity"] == rarity]
 
 
@@ -194,247 +276,193 @@ def roll_one_card():
     weights = [RARITY_RATES[r] for r in rarities]
     rarity = random.choices(rarities, weights=weights, k=1)[0]
     pool = get_cards_by_rarity(rarity)
-    card = random.choice(pool)
-    return card
+    return random.choice(pool)
 
 
-def add_card_to_inventory(player, card_id: str, amount: int = 1):
+def add_card(player, card):
     inv = player["inventory"]
-    inv[card_id] = inv.get(card_id, 0) + amount
+    inv[card["id"]] = inv.get(card["id"], 0) + 1
 
 
 def format_card(card):
     return f"{RARITY_EMOJI[card['rarity']]} **{card['name']}** (`{card['id']}`)"
 
 
-def get_random_card_from_inventory(player):
-    """Chọn ngẫu nhiên 1 card từ inventory của player."""
-    inv = player["inventory"]
+def get_random_card(player):
     pool = []
-    for card_id, count in inv.items():
-        pool.extend([card_id] * count)
-
+    for cid, count in player["inventory"].items():
+        pool += [cid] * count
     if not pool:
         return None
-
-    chosen_id = random.choice(pool)
-    card = next((c for c in CARD_POOL if c["id"] == chosen_id), None)
-    return card
+    cid = random.choice(pool)
+    return next((c for c in CARD_POOL if c["id"] == cid), None)
 
 
-# =================== EVENT ===================
+# =====================================================
+# BOT EVENTS
+# =====================================================
 
 @bot.event
 async def on_ready():
-    print(f"Đăng nhập thành công: {bot.user} (ID: {bot.user.id})")
-    await bot.change_presence(
-        activity=discord.Game(name="Gundam Gacha | !start")
-    )
+    print(f"🤖 Logged in as {bot.user}")
+    await bot.change_presence(activity=discord.Game("Gundam Gacha | !start"))
+    autosave.start()
 
-# =================== LỆNH CƠ BẢN ===================
+
+# =====================================================
+# BASIC COMMANDS
+# =====================================================
 
 @bot.command()
 async def start(ctx):
-    """Tạo tài khoản & nhận 100 Gem lần đầu."""
-    player = get_player(ctx.author)
-    if (
-        player["gems"] == 0
-        and not player["inventory"]
-        and player["stats"]["rolls"] == 0
-    ):
-        player["gems"] = 100
-        await ctx.send(
-            f"🎉 {ctx.author.mention} đã tham gia **Gundam Gacha**!\n"
-            f"Bạn nhận được **100 Gem** khởi đầu. Dùng `!gacha` để quay thử."
-        )
+    p = get_player(ctx.author)
+    if p["gems"] == 0 and p["stats"]["rolls"] == 0:
+        p["gems"] = 100
+        await ctx.send(f"🎉 {ctx.author.mention} đã vào **Gundam Gacha**!\nBạn nhận được **100 Gem**.")
+        save_data()
     else:
-        await ctx.send(
-            f"✅ {ctx.author.mention} bạn đã có tài khoản rồi. "
-            f"Dùng `!balance` để xem Gem."
-        )
+        await ctx.send("✅ Bạn đã có tài khoản rồi.")
 
 
 @bot.command()
 async def balance(ctx):
-    player = get_player(ctx.author)
-    await ctx.send(
-        f"💰 {ctx.author.mention} hiện đang có **{player['gems']} Gem**."
-    )
+    p = get_player(ctx.author)
+    await ctx.send(f"💰 {ctx.author.mention} hiện có **{p['gems']} Gem**.")
 
 
 @bot.command()
 @commands.cooldown(1, 86400, commands.BucketType.user)
 async def daily(ctx):
-    player = get_player(ctx.author)
-    reward = 50
-    player["gems"] += reward
-    await ctx.send(
-        f"📅 {ctx.author.mention} nhận **{reward} Gem** daily!\n"
-        f"Tổng Gem: **{player['gems']}**"
-    )
+    p = get_player(ctx.author)
+    p["gems"] += 100
+    await ctx.send(f"📅 Bạn nhận được **100 Gem Daily**!\nGem hiện tại: **{p['gems']}**")
+    save_data()
 
 
 @daily.error
 async def daily_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
-        await ctx.send(
-            f"⏳ Bạn đã nhận daily rồi, hãy quay lại sau **{error.retry_after:.0f} giây** nữa."
-        )
+        await ctx.send(f"⏳ Hãy quay lại sau **{error.retry_after:.0f} giây**.")
 
-# =================== GACHA ===================
+
+# =====================================================
+# GACHA (HIỆU ỨNG + 1 LẦN/LỆNH)
+# =====================================================
 
 @bot.command()
-async def gacha(ctx, times: int = 1):
-    if times < 1:
-        await ctx.send("❌ Số lần quay phải >= 1.")
-        return
-    if times > 10:
-        await ctx.send("⚠️ Chỉ được quay tối đa **10 lần** mỗi lệnh.")
-        return
+async def gacha(ctx):
+    p = get_player(ctx.author)
 
-    player = get_player(ctx.author)
-    cost_per_roll = 20
-    total_cost = cost_per_roll * times
-
-    if player["gems"] < total_cost:
-        await ctx.send(
-            f"❌ {ctx.author.mention} không đủ Gem! Cần **{total_cost} Gem** "
-            f"nhưng bạn chỉ có **{player['gems']} Gem**."
-        )
+    cost = 20
+    if p["gems"] < cost:
+        await ctx.send("❌ Không đủ Gem!")
         return
 
-    # Trừ gem + cập nhật stats
-    player["gems"] -= total_cost
-    stats = player["stats"]
-    stats["rolls"] += times
+    p["gems"] -= cost
+    p["stats"]["rolls"] += 1
+    GLOBAL_STATS["rolls"] += 1
 
-    # Cập nhật tiến độ quest ngày
-    reset_quests_if_new_day(player)
-    player["quests"]["gacha_rolls"] += times
+    # DAILY + WEEKLY
+    reset_daily(p)
+    reset_weekly(p)
+    p["daily"]["open"] += 1
+    p["weekly"]["open"] += 1
 
-    # Cập nhật global stats
-    GLOBAL_STATS["rolls"] += times
+    # EFFECT 1
+    msg = await ctx.send(f"{ctx.author.mention} 🎰 **Đang quay...**")
+    await asyncio.sleep(0.5)
+    await msg.edit(content=f"{ctx.author.mention} 🎰 **Đang quay... ✨**")
+    await asyncio.sleep(0.5)
+    await msg.edit(content=f"{ctx.author.mention} 🎰 **Đang quay... 🌈**")
+    await asyncio.sleep(0.5)
 
-    results = []
-    for _ in range(times):
-        card = roll_one_card()
-        results.append(card)
-        add_card_to_inventory(player, card["id"], 1)
-        stats[card["rarity"]] += 1
-        GLOBAL_STATS[card["rarity"]] += 1
+    # ROLL
+    card = roll_one_card()
+    add_card(p, card)
 
-    lines = [format_card(c) for c in results]
+    rarity = card["rarity"]
+    p["stats"][rarity] += 1
+    GLOBAL_STATS[rarity] += 1
+
+    # DAILY count rare
+    if rarity == "SR":
+        p["daily"]["sr"] += 1
+        p["weekly"]["sr"] += 1
+    if rarity == "UR":
+        p["daily"]["ur"] += 1
+        p["weekly"]["ur"] += 1
 
     embed = discord.Embed(
-        title=f"🎰 Gundam Gacha – Kết quả ({times}x)",
-        description="\n".join(lines),
-        color=discord.Color.purple()
+        title="🎰 Gundam Gacha – Kết quả",
+        description=format_card(card),
+        color=discord.Color.purple(),
     )
-    embed.set_footer(
-        text=f"{ctx.author.display_name} | Gem còn lại: {player['gems']}"
-    )
+    embed.set_footer(text=f"Gem còn lại: {p['gems']}")
 
-    await ctx.send(content=f"{ctx.author.mention}", embed=embed)
+    await msg.edit(content=f"{ctx.author.mention}", embed=embed)
+    save_data()
 
-# =================== BỘ SƯU TẬP & LIST ===================
+
+# =====================================================
+# COLLECTION
+# =====================================================
 
 @bot.command()
 async def collection(ctx):
-    player = get_player(ctx.author)
-    inv = player["inventory"]
-
+    p = get_player(ctx.author)
+    inv = p["inventory"]
     if not inv:
-        await ctx.send(
-            f"🎒 {ctx.author.mention} chưa có card nào, thử `!gacha` đi!"
-        )
+        await ctx.send("🎒 Bạn chưa có card nào!")
         return
 
-    card_map = {c["id"]: c for c in CARD_POOL}
-
-    lines_ur, lines_sr, lines_r, lines_c = [], [], [], []
-
-    for card_id, count in inv.items():
-        card = card_map.get(card_id)
-        if not card:
-            continue
-        line = f"{format_card(card)} x{count}"
-        if card["rarity"] == "UR":
-            lines_ur.append(line)
-        elif card["rarity"] == "SR":
-            lines_sr.append(line)
-        elif card["rarity"] == "R":
-            lines_r.append(line)
-        else:
-            lines_c.append(line)
+    by_r = {"UR": [], "SR": [], "R": [], "C": []}
+    for card in CARD_POOL:
+        if card["id"] in inv:
+            by_r[card["rarity"]].append(f"{format_card(card)} x{inv[card['id']]}")
 
     embed = discord.Embed(
         title=f"📚 Bộ sưu tập của {ctx.author.display_name}",
-        color=discord.Color.blue()
+        color=discord.Color.blue(),
     )
 
-    if lines_ur:
-        embed.add_field(name="🌈 Ultra Rare", value="\n".join(lines_ur[:10]), inline=False)
-    if lines_sr:
-        embed.add_field(name="💎 Super Rare", value="\n".join(lines_sr[:10]), inline=False)
-    if lines_r:
-        embed.add_field(name="✨ Rare", value="\n".join(lines_r[:10]), inline=False)
-    if lines_c:
-        embed.add_field(name="⭐ Common", value="\n".join(lines_c[:10]), inline=False)
+    for rarity in ["UR", "SR", "R", "C"]:
+        if by_r[rarity]:
+            embed.add_field(
+                name=f"{RARITY_EMOJI[rarity]} {rarity}",
+                value="\n".join(by_r[rarity]),
+                inline=False,
+            )
 
     await ctx.send(embed=embed)
 
 
 @bot.command()
 async def cards(ctx):
-    """Xem danh sách card có thể quay (tự chia nhỏ tránh > 2000 ký tự)."""
-    lines = [format_card(c) for c in CARD_POOL]
-    text = "🎴 **Các card có thể quay:**\n" + "\n".join(lines)
+    text = "🎴 **Danh sách card:**\n" + "\n".join(format_card(c) for c in CARD_POOL)
 
-    chunk_size = 1900
-    for i in range(0, len(text), chunk_size):
-        await ctx.send(text[i:i + chunk_size])
+    if len(text) > 1900:
+        chunks = [text[i:i+1900] for i in range(0, len(text), 1900)]
+        for c in chunks:
+            await ctx.send(c)
+    else:
+        await ctx.send(text)
 
-# =================== PROFILE / SELL / TOP ===================
 
-@bot.command()
-async def profile(ctx):
-    player = get_player(ctx.author)
-    s = player["stats"]
-
-    embed = discord.Embed(
-        title=f"🧾 Gundam Gacha – Profile của {ctx.author.display_name}",
-        color=discord.Color.gold()
-    )
-    embed.add_field(name="Gem", value=str(player["gems"]), inline=True)
-    embed.add_field(name="Total Rolls", value=str(s["rolls"]), inline=True)
-    embed.add_field(
-        name="Rarity stats",
-        value=(
-            f"🌈 UR: **{s['UR']}**\n"
-            f"💎 SR: **{s['SR']}**\n"
-            f"✨ R: **{s['R']}**\n"
-            f"⭐ C: **{s['C']}**"
-        ),
-        inline=False
-    )
-
-    await ctx.send(embed=embed)
-
+# =====================================================
+# SELL CARD
+# =====================================================
 
 @bot.command()
 async def sell(ctx, card_id: str, amount: int = 1):
+    p = get_player(ctx.author)
     card_id = card_id.upper()
+
     if amount < 1:
-        await ctx.send("❌ Số lượng bán phải >= 1.")
+        await ctx.send("❌ Số lượng không hợp lệ.")
         return
 
-    player = get_player(ctx.author)
-    inv = player["inventory"]
-
-    if card_id not in inv or inv[card_id] < amount:
-        await ctx.send(
-            f"❌ {ctx.author.mention} không đủ card `{card_id}` để bán."
-        )
+    if card_id not in p["inventory"] or p["inventory"][card_id] < amount:
+        await ctx.send("❌ Bạn không có đủ card.")
         return
 
     card = next((c for c in CARD_POOL if c["id"] == card_id), None)
@@ -443,449 +471,407 @@ async def sell(ctx, card_id: str, amount: int = 1):
         return
 
     rarity = card["rarity"]
-    value_per = SELL_VALUES.get(rarity, 1)
-    total_value = value_per * amount
+    reward = SELL_VALUES[rarity] * amount
 
-    inv[card_id] -= amount
-    if inv[card_id] <= 0:
-        del inv[card_id]
+    p["inventory"][card_id] -= amount
+    if p["inventory"][card_id] <= 0:
+        del p["inventory"][card_id]
 
-    player["gems"] += total_value
+    p["gems"] += reward
+    p["daily"]["sell"] += amount
 
     await ctx.send(
-        f"💸 {ctx.author.mention} đã bán **{amount}x {card['name']}** "
-        f"({rarity}) và nhận được **{total_value} Gem**.\n"
-        f"Gem hiện tại: **{player['gems']}**"
+        f"💸 Bán **{amount}x {card['name']}** và nhận **{reward} Gem**!\n"
+        f"Gem hiện tại: **{p['gems']}**"
     )
 
+    save_data()
+
+# END OF PART 2
+# =====================================================
+# QUEST CONFIG
+# =====================================================
+
+DAILY_QUESTS = [
+    {"key": "open_5", "label": "Quay 5 lần gacha", "target": 5, "reward": 80},
+    {"key": "open_10", "label": "Quay 10 lần gacha", "target": 10, "reward": 150},
+    {"key": "open_20", "label": "Quay 20 lần gacha", "target": 20, "reward": 300},
+    {"key": "sell_3", "label": "Bán 3 card", "target": 3, "reward": 40},
+    {"key": "sr_1", "label": "Nhận 1 SR", "target": 1, "reward": 70},
+    {"key": "ur_1", "label": "Nhận 1 UR", "target": 1, "reward": 150},
+    {"key": "duel_1", "label": "Thắng 1 trận đấu", "target": 1, "reward": 100},
+    {"key": "duel_3", "label": "Thắng 3 trận đấu", "target": 3, "reward": 250},
+]
+
+
+WEEKLY_QUESTS = [
+    {"key": "open_100", "label": "Quay 100 lần gacha", "target": 100, "reward": 600},
+    {"key": "sr_10", "label": "Nhận 10 SR", "target": 10, "reward": 500},
+    {"key": "ur_3", "label": "Nhận 3 UR", "target": 3, "reward": 1200},
+    {"key": "duel_10", "label": "Thắng 10 trận đấu", "target": 10, "reward": 1000},
+]
+
+
+ACHIEVEMENTS = [
+    {"key": "roll_100", "label": "Quay tổng 100 lần", "check": lambda p: p["stats"]["rolls"] >= 100, "reward": 200},
+    {"key": "roll_1000", "label": "Quay tổng 1000 lần", "check": lambda p: p["stats"]["rolls"] >= 1000, "reward": 2000},
+    {"key": "ur_master", "label": "Sở hữu 10 UR", 
+        "check": lambda p: sum(p["inventory"].get(c["id"],0) for c in CARD_POOL if c["rarity"]=="UR") >= 10,
+        "reward": 1500},
+    {"key": "collector", "label": "Sở hữu 50 card khác nhau",
+        "check": lambda p: len(p["inventory"]) >= 50,
+        "reward": 1000},
+    {"key": "rich", "label": "Có 5000 Gem", "check": lambda p: p["gems"] >= 5000, "reward": 500},
+]
+
+
+# =====================================================
+# QUEST VIEW COMMANDS
+# =====================================================
 
 @bot.command()
-async def top(ctx):
-    if not players:
-        await ctx.send("⚠️ Chưa có ai chơi Gundam Gacha. Dùng `!start` trước nhé!")
-        return
-
-    def score(pdata):
-        s = pdata["stats"]
-        return s["UR"] * 3 + s["SR"] * 2 + s["R"]
-
-    sorted_players = sorted(
-        players.items(),
-        key=lambda kv: score(kv[1]),
-        reverse=True
-    )
-
-    lines = []
-    for rank, (uid, pdata) in enumerate(sorted_players[:10], start=1):
-        s = pdata["stats"]
-        lines.append(
-            f"**#{rank}** <@{uid}> – "
-            f"Điểm: **{score(pdata)}** "
-            f"(UR: {s['UR']}, SR: {s['SR']}, R: {s['R']})"
-        )
+async def quests(ctx):
+    p = get_player(ctx.author)
+    reset_daily(p)
 
     embed = discord.Embed(
-        title="🏆 Gundam Gacha – Leaderboard",
-        description="\n".join(lines),
-        color=discord.Color.dark_gold()
-    )
-    await ctx.send(embed=embed)
-
-# =================== QUEST NGÀY ===================
-
-@bot.command(name="quests")
-async def quests_cmd(ctx):
-    """Xem nhiệm vụ ngày để kiếm Gem."""
-    player = get_player(ctx.author)
-    reset_quests_if_new_day(player)
-    q = player["quests"]
-
-    target = 10     # cần quay 10 lần
-    reward = 50     # thưởng 50 Gem
-    progress = q["gacha_rolls"]
-    done = progress >= target
-    claimed = q["claimed"]
-
-    status = "✅ ĐÃ HOÀN THÀNH" if done else "⏳ Đang làm"
-    if done and claimed:
-        status += " – 🎁 ĐÃ NHẬN THƯỞNG"
-
-    embed = discord.Embed(
-        title="📜 Nhiệm vụ ngày – Gundam Gacha",
+        title="📜 Nhiệm vụ ngày",
         color=discord.Color.green()
     )
-    embed.add_field(
-        name="Nhiệm vụ 1: Quay gacha",
-        value=(
-            f"Quay **{target} lần gacha** trong hôm nay.\n"
-            f"Tiến độ: **{progress}/{target}**\n"
-            f"Trạng thái: {status}\n"
-            f"Phần thưởng: **+{reward} Gem** (dùng `!questclaim` để nhận)"
-        ),
-        inline=False
-    )
 
+    for q in DAILY_QUESTS:
+        key = q["key"]
+        label = q["label"]
+        target = q["target"]
+        reward = q["reward"]
+
+        # progress
+        if key.startswith("open"):
+            progress = p["daily"]["open"]
+        elif key.startswith("sell"):
+            progress = p["daily"]["sell"]
+        elif key.startswith("sr"):
+            progress = p["daily"]["sr"]
+        elif key.startswith("ur"):
+            progress = p["daily"]["ur"]
+        elif key.startswith("duel"):
+            progress = p["daily"]["duel"]
+        else:
+            progress = 0
+
+        claimed = p["daily"]["claimed"].get(key, False)
+
+        status = "🎁 ĐÃ NHẬN" if claimed else ("✅ XONG" if progress >= target else "⏳ Đang làm")
+
+        embed.add_field(
+            name=f"{label}",
+            value=f"Tiến độ: **{progress}/{target}**\nPhần thưởng: **+{reward} Gem**\nTrạng thái: {status}",
+            inline=False,
+        )
+
+    embed.set_footer(text="Dùng !claim daily để nhận thưởng đã hoàn thành.")
     await ctx.send(embed=embed)
 
 
-@bot.command()
-async def questclaim(ctx):
-    """Nhận thưởng nhiệm vụ ngày (nếu đủ điều kiện)."""
-    player = get_player(ctx.author)
-    reset_quests_if_new_day(player)
-    q = player["quests"]
-
-    target = 10
-    reward = 50
-
-    if q["claimed"]:
-        await ctx.send(
-            f"✅ {ctx.author.mention} hôm nay bạn đã nhận thưởng nhiệm vụ rồi, "
-            "hãy quay lại vào ngày mai nhé!"
-        )
-        return
-
-    if q["gacha_rolls"] < target:
-        await ctx.send(
-            f"⏳ {ctx.author.mention} bạn chưa hoàn thành nhiệm vụ.\n"
-            f"Hãy quay thêm gacha (hiện tại **{q['gacha_rolls']}/{target}**)."
-        )
-        return
-
-    q["claimed"] = True
-    player["gems"] += reward
-
-    await ctx.send(
-        f"🎁 {ctx.author.mention} nhận **{reward} Gem** từ nhiệm vụ ngày!\n"
-        f"Gem hiện tại: **{player['gems']}**"
-    )
-
-# =================== TÍNH NĂNG MỚI: GIFT / REROLL / CARDINFO / GLOBAL STATS ===================
 
 @bot.command()
-async def gift(ctx, member: discord.Member, amount: int):
-    """
-    Chuyển Gem cho người khác.
-    Ví dụ: !gift @TênNgườiNhận 50
-    """
-    if amount <= 0:
-        await ctx.send("❌ Số Gem chuyển phải > 0.")
-        return
-
-    if member.id == ctx.author.id:
-        await ctx.send("❌ Bạn không thể tự chuyển Gem cho chính mình.")
-        return
-
-    sender = get_player(ctx.author)
-    receiver = get_player(member)
-
-    if sender["gems"] < amount:
-        await ctx.send(
-            f"❌ {ctx.author.mention} không đủ Gem để chuyển.\n"
-            f"Gem hiện tại: **{sender['gems']}**"
-        )
-        return
-
-    sender["gems"] -= amount
-    receiver["gems"] += amount
-
-    await ctx.send(
-        f"💳 {ctx.author.mention} đã chuyển **{amount} Gem** cho {member.mention}.\n"
-        f"Gem của bạn còn: **{sender['gems']}**"
-    )
-
-
-@bot.command()
-async def reroll(ctx, card_id: str):
-    """
-    Đổi 1 card sang 1 card random cùng độ hiếm (tốn Gem).
-    Ví dụ: !reroll ZAKU2
-    """
-    card_id = card_id.upper()
-    cost = 30  # giá reroll
-
-    player = get_player(ctx.author)
-    inv = player["inventory"]
-
-    if card_id not in inv or inv[card_id] < 1:
-        await ctx.send(
-            f"❌ {ctx.author.mention} không có card `{card_id}` để reroll."
-        )
-        return
-
-    if player["gems"] < cost:
-        await ctx.send(
-            f"❌ {ctx.author.mention} không đủ Gem để reroll (cần **{cost} Gem**).\n"
-            f"Gem hiện tại: **{player['gems']}**"
-        )
-        return
-
-    old_card = next((c for c in CARD_POOL if c["id"] == card_id), None)
-    if not old_card:
-        await ctx.send("❌ Card ID không hợp lệ.")
-        return
-
-    rarity = old_card["rarity"]
-    same_rarity_cards = [c for c in CARD_POOL if c["rarity"] == rarity and c["id"] != card_id]
-
-    if not same_rarity_cards:
-        await ctx.send("⚠️ Không có card nào khác cùng độ hiếm để reroll.")
-        return
-
-    # Trừ Gem + trừ card cũ
-    player["gems"] -= cost
-    inv[card_id] -= 1
-    if inv[card_id] <= 0:
-        del inv[card_id]
-
-    # Nhận card mới cùng rarity
-    new_card = random.choice(same_rarity_cards)
-    add_card_to_inventory(player, new_card["id"], 1)
-
-    await ctx.send(
-        f"🎲 {ctx.author.mention} đã reroll **{old_card['name']}** (`{old_card['id']}`) "
-        f"thành **{new_card['name']}** (`{new_card['id']}`) – độ hiếm **{rarity}**.\n"
-        f"💰 Gem còn lại: **{player['gems']}**"
-    )
-
-
-@bot.command()
-async def cardinfo(ctx, card_id: str):
-    """
-    Xem thông tin 1 card.
-    Ví dụ: !cardinfo RX78
-    """
-    card_id = card_id.upper()
-    card = next((c for c in CARD_POOL if c["id"] == card_id), None)
-
-    if not card:
-        await ctx.send(f"❌ Không tìm thấy card với ID `{card_id}`.")
-        return
-
-    rarity = card["rarity"]
-    embed = discord.Embed(
-        title=f"📇 Thông tin card: {card['name']}",
-        color=discord.Color.from_str("#FFD700") if rarity == "UR" else (
-            discord.Color.from_str("#00FFFF") if rarity == "SR" else (
-                discord.Color.from_str("#00FF7F") if rarity == "R" else discord.Color.light_grey()
-            )
-        )
-    )
-    embed.add_field(name="ID", value=card["id"], inline=True)
-    embed.add_field(name="Độ hiếm", value=f"{RARITY_EMOJI[rarity]} `{rarity}`", inline=True)
-    await ctx.send(embed=embed)
-
-
-@bot.command()
-async def globalstats(ctx):
-    """
-    Thống kê chung toàn server: tổng lượt quay, tổng UR/SR/R/C.
-    """
-    if GLOBAL_STATS["rolls"] == 0:
-        await ctx.send("⚠️ Chưa có ai quay gacha cả.")
-        return
+async def weekly(ctx):
+    p = get_player(ctx.author)
+    reset_weekly(p)
 
     embed = discord.Embed(
-        title="🌐 Thống kê toàn server – Gundam Gacha",
-        color=discord.Color.teal()
+        title="📅 Nhiệm vụ tuần",
+        color=discord.Color.blue()
     )
-    embed.add_field(name="Tổng lượt quay", value=str(GLOBAL_STATS["rolls"]), inline=False)
-    embed.add_field(
-        name="Rarity tổng",
-        value=(
-            f"🌈 UR: **{GLOBAL_STATS['UR']}**\n"
-            f"💎 SR: **{GLOBAL_STATS['SR']}**\n"
-            f"✨ R: **{GLOBAL_STATS['R']}**\n"
-            f"⭐ C: **{GLOBAL_STATS['C']}**"
-        ),
-        inline=False
-    )
+
+    for q in WEEKLY_QUESTS:
+        key = q["key"]
+        label = q["label"]
+        target = q["target"]
+        reward = q["reward"]
+
+        if key.startswith("open"):
+            progress = p["weekly"]["open"]
+        elif key.startswith("sr"):
+            progress = p["weekly"]["sr"]
+        elif key.startswith("ur"):
+            progress = p["weekly"]["ur"]
+        elif key.startswith("duel"):
+            progress = p["weekly"]["duel"]
+        else:
+            progress = 0
+
+        claimed = p["weekly"]["claimed"].get(key, False)
+
+        status = "🎁 ĐÃ NHẬN" if claimed else ("✅ XONG" if progress >= target else "⏳ Đang làm")
+
+        embed.add_field(
+            name=label,
+            value=f"Tiến độ: **{progress}/{target}**\nThưởng: **+{reward} Gem**\nTrạng thái: {status}",
+            inline=False,
+        )
+
+    embed.set_footer(text="Dùng !claim weekly để nhận nhiệm vụ tuần.")
     await ctx.send(embed=embed)
 
-# =================== ĐÁNH NHAU – DUEL ===================
+
+
+@bot.command()
+async def achievements(ctx):
+    p = get_player(ctx.author)
+
+    embed = discord.Embed(
+        title="🏆 Thành tựu",
+        color=discord.Color.gold()
+    )
+
+    for a in ACHIEVEMENTS:
+        key = a["key"]
+        label = a["label"]
+        reward = a["reward"]
+        unlocked = a["check"](p)
+        claimed = p["achievements"].get(key, False)
+
+        status = "🎁 ĐÃ NHẬN" if claimed else ("🏅 MỞ KHÓA" if unlocked else "🔒 Chưa đạt")
+
+        embed.add_field(
+            name=label,
+            value=f"Thưởng: **+{reward} Gem**\nTrạng thái: {status}",
+            inline=False,
+        )
+
+    embed.set_footer(text="Dùng !claim achievement để nhận thành tựu mở khóa.")
+    await ctx.send(embed=embed)
+
+
+# =====================================================
+# CLAIM COMMAND
+# =====================================================
+
+@bot.command()
+async def claim(ctx, type: str):
+    p = get_player(ctx.author)
+
+    if type == "daily":
+        reset_daily(p)
+        total = 0
+
+        for q in DAILY_QUESTS:
+            key = q["key"]
+            target = q["target"]
+            reward = q["reward"]
+
+            # progress
+            if key.startswith("open"):
+                progress = p["daily"]["open"]
+            elif key.startswith("sell"):
+                progress = p["daily"]["sell"]
+            elif key.startswith("sr"):
+                progress = p["daily"]["sr"]
+            elif key.startswith("ur"):
+                progress = p["daily"]["ur"]
+            elif key.startswith("duel"):
+                progress = p["daily"]["duel"]
+            else:
+                progress = 0
+
+            if progress >= target and not p["daily"]["claimed"].get(key, False):
+                p["daily"]["claimed"][key] = True
+                total += reward
+
+        if total == 0:
+            await ctx.send("⏳ Chưa có nhiệm vụ ngày để nhận.")
+        else:
+            p["gems"] += total
+            await ctx.send(f"🎁 Nhận được **{total} Gem** từ nhiệm vụ ngày!")
+            save_data()
+        return
+
+
+    elif type == "weekly":
+        reset_weekly(p)
+        total = 0
+
+        for q in WEEKLY_QUESTS:
+            key = q["key"]
+            target = q["target"]
+            reward = q["reward"]
+
+            if key.startswith("open"):
+                progress = p["weekly"]["open"]
+            elif key.startswith("sr"):
+                progress = p["weekly"]["sr"]
+            elif key.startswith("ur"):
+                progress = p["weekly"]["ur"]
+            elif key.startswith("duel"):
+                progress = p["weekly"]["duel"]
+            else:
+                progress = 0
+
+            if progress >= target and not p["weekly"]["claimed"].get(key, False):
+                p["weekly"]["claimed"][key] = True
+                total += reward
+
+        if total == 0:
+            await ctx.send("⏳ Không có nhiệm vụ tuần để nhận.")
+        else:
+            p["gems"] += total
+            await ctx.send(f"🎁 Nhận **{total} Gem** từ nhiệm vụ tuần!")
+            save_data()
+        return
+
+
+    elif type == "achievement":
+        total = 0
+
+        for a in ACHIEVEMENTS:
+            key = a["key"]
+            reward = a["reward"]
+            if a["check"](p) and not p["achievements"].get(key, False):
+                p["achievements"][key] = True
+                total += reward
+
+        if total == 0:
+            await ctx.send("⏳ Không có thành tựu để nhận.")
+        else:
+            p["gems"] += total
+            await ctx.send(f"🏆 Nhận **{total} Gem** từ thành tựu!")
+            save_data()
+
+        return
+
+    else:
+        await ctx.send("❌ Sai cú pháp. Dùng:\n`!claim daily`\n`!claim weekly`\n`!claim achievement`")
+
+
+
+# =====================================================
+# DUEL SYSTEM
+# =====================================================
 
 @bot.command()
 async def duel(ctx, opponent: discord.Member, bet: int = 0):
-    """
-    Thách đấu 1vs1 dùng card trong bộ sưu tập.
-    Ví dụ:
-      !duel @TênBạn         -> không cược
-      !duel @TênBạn 50      -> mỗi người đặt 50 Gem, thắng ăn hết
-    """
     if opponent.id == ctx.author.id:
         await ctx.send("❌ Bạn không thể tự đấu với chính mình.")
-        return
-
-    if bet < 0:
-        await ctx.send("❌ Tiền cược không thể âm.")
         return
 
     p1 = get_player(ctx.author)
     p2 = get_player(opponent)
 
-    # Check có card để đánh không
+    # check inventory
     if not p1["inventory"]:
-        await ctx.send(f"❌ {ctx.author.mention} chưa có card nào để đấu, hãy `!gacha` trước.")
+        await ctx.send("❌ Bạn chưa có card để đấu.")
         return
-
     if not p2["inventory"]:
-        await ctx.send(f"❌ {opponent.mention} chưa có card nào để đấu, họ cần `!gacha` trước.")
+        await ctx.send("❌ Đối thủ không có card để đấu.")
         return
 
-    # Check Gem đủ cược nếu có bet
+    # bet check
+    if bet < 0:
+        await ctx.send("❌ Tiền cược không hợp lệ.")
+        return
     if bet > 0:
         if p1["gems"] < bet:
-            await ctx.send(
-                f"❌ {ctx.author.mention} không đủ Gem để cược (**{bet} Gem**).\n"
-                f"Gem của bạn: **{p1['gems']}**"
-            )
+            await ctx.send("❌ Bạn không đủ Gem để cược.")
             return
         if p2["gems"] < bet:
-            await ctx.send(
-                f"❌ {opponent.mention} không đủ Gem để cược (**{bet} Gem**).\n"
-                f"Gem của họ: **{p2['gems']}**"
-            )
+            await ctx.send("❌ Đối thủ không đủ Gem để cược.")
             return
 
-        # Trừ cược tạm thời
         p1["gems"] -= bet
         p2["gems"] -= bet
 
-    # Chọn card random cho mỗi người
-    c1 = get_random_card_from_inventory(p1)
-    c2 = get_random_card_from_inventory(p2)
+    c1 = get_random_card(p1)
+    c2 = get_random_card(p2)
 
-    if c1 is None or c2 is None:
-        await ctx.send("⚠️ Lỗi chọn card, thử lại sau.")
-        # Hoàn lại cược nếu có
-        if bet > 0:
-            p1["gems"] += bet
-            p2["gems"] += bet
-        return
+    base1 = RARITY_POWER[c1["rarity"]]
+    base2 = RARITY_POWER[c2["rarity"]]
 
-    # Tính sức mạnh: base theo rarity + random thêm
-    base1 = RARITY_POWER.get(c1["rarity"], 1)
-    base2 = RARITY_POWER.get(c2["rarity"], 1)
     roll1 = random.randint(0, 3)
     roll2 = random.randint(0, 3)
+
     power1 = base1 + roll1
     power2 = base2 + roll2
 
-    # Xử lý kết quả
-    result_text = ""
+    # update stats daily + weekly
     if power1 > power2:
-        # ctx.author thắng
-        if bet > 0:
-            reward = bet * 2
-            p1["gems"] += reward
-            result_text = (
-                f"🏆 {ctx.author.mention} **CHIẾN THẮNG** và nhận **{reward} Gem** "
-                f"từ tiền cược!"
-            )
-        else:
-            result_text = f"🏆 {ctx.author.mention} **CHIẾN THẮNG**!"
+        winner = ctx.author
+        p1["daily"]["duel"] += 1
+        p1["weekly"]["duel"] += 1
     elif power2 > power1:
-        # opponent thắng
-        if bet > 0:
-            reward = bet * 2
-            p2["gems"] += reward
-            result_text = (
-                f"🏆 {opponent.mention} **CHIẾN THẮNG** và nhận **{reward} Gem** "
-                f"từ tiền cược!"
-            )
-        else:
-            result_text = f"🏆 {opponent.mention} **CHIẾN THẮNG**!"
+        winner = opponent
+        p2["daily"]["duel"] += 1
+        p2["weekly"]["duel"] += 1
     else:
-        # Hòa -> hoàn cược
-        if bet > 0:
-            p1["gems"] += bet
-            p2["gems"] += bet
-        result_text = "⚔️ Trận đấu **HÒA**! Cả hai đều chiến quá ác."
+        winner = None  # draw
 
     embed = discord.Embed(
-        title="🤺 Gundam Gacha – Trận đấu 1vs1",
+        title="🤺 Trận đấu Gundam",
         color=discord.Color.red()
     )
     embed.add_field(
         name=f"{ctx.author.display_name}",
-        value=(
-            f"Card: {format_card(c1)}\n"
-            f"Sức mạnh: **{power1}** "
-            f"(base {base1} + roll {roll1})"
-        ),
+        value=f"Card: {format_card(c1)}\nSức mạnh: **{power1}** (roll: {roll1})",
         inline=False
     )
     embed.add_field(
         name=f"{opponent.display_name}",
-        value=(
-            f"Card: {format_card(c2)}\n"
-            f"Sức mạnh: **{power2}** "
-            f"(base {base2} + roll {roll2})"
-        ),
+        value=f"Card: {format_card(c2)}\nSức mạnh: **{power2}** (roll: {roll2})",
         inline=False
     )
 
-    if bet > 0:
-        embed.add_field(
-            name="💰 Tiền cược",
-            value=f"Mỗi người: **{bet} Gem**",
-            inline=False
-        )
-
-    embed.add_field(name="Kết quả", value=result_text, inline=False)
+    if winner is None:
+        embed.add_field(name="Kết quả", value="⚔️ **HÒA**! Hoàn lại cược.", inline=False)
+        if bet > 0:
+            p1["gems"] += bet
+            p2["gems"] += bet
+    else:
+        if bet > 0:
+            reward = bet * 2
+            players[winner.id]["gems"] += reward
+            embed.add_field(name="Kết quả", value=f"🏆 {winner.mention} thắng và nhận **{reward} Gem**!", inline=False)
+        else:
+            embed.add_field(name="Kết quả", value=f"🏆 {winner.mention} thắng!", inline=False)
 
     await ctx.send(embed=embed)
+    save_data()
 
-# =================== LỆNH LIỆT KÊ COMMAND ===================
+
+# =====================================================
+# COMMAND LIST
+# =====================================================
 
 @bot.command(name="commands")
 async def commands_list(ctx):
     embed = discord.Embed(
-        title="🤖 Gundam Gacha – Command List",
-        color=discord.Color.blue()
+        title="🤖 Gundam Gacha – Danh sách lệnh",
+        color=discord.Color.cyan()
     )
 
-    embed.add_field(
-        name="🔰 Bắt đầu",
-        value=(
-            "`!start` – tạo tài khoản\n"
-            "`!daily` – nhận Gem mỗi ngày\n"
-            "`!balance` – xem số Gem hiện tại\n"
-            "`!profile` – xem hồ sơ gacha của bạn\n"
-            "`!quests` – xem nhiệm vụ ngày\n"
-            "`!questclaim` – nhận thưởng nhiệm vụ ngày"
-        ),
-        inline=False
-    )
+    embed.add_field(name="🔰 Cơ bản",
+        value="`!start`\n`!balance`\n`!daily`\n`!commands`",
+        inline=False)
 
-    embed.add_field(
-        name="🎰 Gacha & Bộ sưu tập",
-        value=(
-            "`!gacha` hoặc `!gacha 10` – quay 1 / 10 lần\n"
-            "`!collection` – xem bộ sưu tập card\n"
-            "`!cards` – xem tất cả card có thể quay\n"
-            "`!cardinfo <CARD_ID>` – xem thông tin 1 card"
-        ),
-        inline=False
-    )
+    embed.add_field(name="🎰 Gacha & Card",
+        value="`!gacha`\n`!collection`\n`!cards`\n`!sell <id> <sl>`",
+        inline=False)
 
-    embed.add_field(
-        name="💸 Giao dịch, Đấu & Xếp hạng",
-        value=(
-            "`!sell <CARD_ID> <SỐ_LƯỢNG>` – bán card lấy Gem\n"
-            "`!gift @user <SỐ_GEM>` – chuyển Gem cho người khác\n"
-            "`!reroll <CARD_ID>` – đổi 1 card sang card khác cùng độ hiếm (tốn Gem)\n"
-            "`!duel @user [CƯỢC]` – đấu 1vs1, dùng card random, có thể cược Gem\n"
-            "`!top` – bảng xếp hạng người chơi\n"
-            "`!globalstats` – thống kê toàn server"
-        ),
-        inline=False
-    )
+    embed.add_field(name="📜 Nhiệm vụ",
+        value="`!quests`\n`!weekly`\n`!achievements`\n`!claim daily`\n`!claim weekly`\n`!claim achievement`",
+        inline=False)
 
-    embed.set_footer(text="Gõ tên lệnh như trên, không cần <>.")
+    embed.add_field(name="🤺 Đấu",
+        value="`!duel @user [cược]`",
+        inline=False)
 
     await ctx.send(embed=embed)
 
-# =================== CHẠY BOT ===================
 
+# =====================================================
+# RUN BOT
+# =====================================================
+
+load_data()
 bot.run(TOKEN)
+
+# END OF PART 3
